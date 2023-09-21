@@ -23,10 +23,16 @@
 *                             エンバグを修正
 * Itagaki Fumihiko 25-Jan-93  エラー・メッセージの修正
 * 1.5
+* Itagaki Fumihiko 27-Nov-93  -m-w+x （-m と mode をくっつけて指定）を許す
+* Itagaki Fumihiko 27-Nov-93  -m 644 （8進数値表現）を許す
+* Itagaki Fumihiko 28-Nov-93  一部の処理の高速化
+* Itagaki Fumihiko 30-Dec-93  各ドライブのカレント・ディレクトリの移動を禁止
+* Itagaki Fumihiko 30-Dec-93  ディレクトリを移動したら .. のリンク先を修正する
+* 1.6
 *
-* Usage: mv [ -Ifiuvx ] [ -m {[ugoa]{{+-=}[ashrwx]}...}[,...] ] [ -- ] <ファイル1> <ファイル2>
-*        mv [ -Ifiuvx ] [ -m {[ugoa]{{+-=}[ashrwx]}...}[,...] ] [ -- ] <ディレクトリ1> <ディレクトリ2>
-*        mv [ -Iefiuvx ] [ -m {[ugoa]{{+-=}[ashrwx]}...}[,...] ] [ -- ] <ファイル> ... <ディレクトリ>
+* Usage: mv [ -Ifiuvx ] [ -m mode ] [ -- ] <ファイル1> <ファイル2>
+*        mv [ -Ifiuvx ] [ -m mode ] [ -- ] <ディレクトリ1> <ディレクトリ2>
+*        mv [ -Iefiuvx ] [ -m mode ] [ -- ] <ファイル> ... <ディレクトリ>
 
 .include doscall.h
 .include error.h
@@ -38,11 +44,15 @@
 .xref getlnenv
 .xref issjis
 .xref strlen
-.xref strcpy
+.xref strcmp
 .xref strfor1
+.xref memcmp
 .xref headtail
 .xref cat_pathname
+.xref bsltosl
 .xref strip_excessive_slashes
+.xref getcwd
+.xref chdir
 .xref fclose
 
 REQUIRED_OSVER	equ	$200			*  2.00以降
@@ -50,13 +60,15 @@ REQUIRED_OSVER	equ	$200			*  2.00以降
 STACKSIZE	equ	16384			*  スーパーバイザモードでは15KB以上必要
 GETSLEN		equ	32
 
-FLAG_f		equ	0
-FLAG_i		equ	1
-FLAG_I		equ	2
-FLAG_u		equ	3
-FLAG_v		equ	4
-FLAG_x		equ	5
-FLAG_e		equ	6
+FLAG_f			equ	0
+FLAG_i			equ	1
+FLAG_I			equ	2
+FLAG_u			equ	3
+FLAG_v			equ	4
+FLAG_x			equ	5
+FLAG_e			equ	6
+FLAG_identical		equ	7
+FLAG_assign_cleared	equ	8
 
 LNDRV_O_CREATE		equ	4*2
 LNDRV_O_OPEN		equ	4*3
@@ -111,11 +123,11 @@ start1:
 		cmp.l	#1024,d0
 		blo	insufficient_memory
 
-		move.l	d0,d4				*  D4.L : バッファサイズ
+		move.l	d0,copy_buffer_size
 		bsr	malloc
 		bmi	insufficient_memory
 
-		movea.l	d0,a4				*  A4 : バッファ
+		move.l	d0,copy_buffer_top
 	*
 	*  lndrv が組み込まれているかどうかを検査する
 	*
@@ -218,97 +230,147 @@ set_option_done:
 		bra	decode_opt_loop1
 
 decode_mode:
-		tst.b	(a0)+
-		bne	bad_arg
+		tst.b	(a0)
+		bne	decode_mode_0
 
 		subq.l	#1,d7
 		bcs	too_few_args
 
+		addq.l	#1,a0
+decode_mode_0:
+		move.b	(a0),d0
+		cmp.b	#'0',d0
+		blo	decode_symbolic_mode
+
+		cmp.b	#'7',d0
+		bhi	decode_symbolic_mode
+
+	*  numeric mode
+
+		moveq	#0,d1
+scan_numeric_mode_loop:
+		move.b	(a0)+,d0
+		beq	scan_numeric_mode_done
+
+		sub.b	#'0',d0
+		blo	bad_arg
+
+		cmp.b	#7,d0
+		bhi	bad_arg
+
+		lsl.w	#3,d1
+		or.b	d0,d1
+		bra	scan_numeric_mode_loop
+
+scan_numeric_mode_done:
+		move.w	d1,d0
+		lsr.w	#3,d0
+		or.w	d0,d1
+		lsr.w	#3,d0
+		or.w	d0,d1
+		moveq	#0,d0
+		btst	#1,d1
+		beq	decode_numeric_mode_w_ok
+
+		bset	#MODEBIT_RDO,d0
+decode_numeric_mode_w_ok:
+		btst	#0,d1
+		beq	decode_numeric_mode_x_ok
+
+		bset	#MODEBIT_EXE,d0
+decode_numeric_mode_x_ok:
+		move.b	d0,mode_plus
+		move.b	#(MODEVAL_VOL|MODEVAL_DIR|MODEVAL_LNK|MODEVAL_ARC|MODEVAL_SYS|MODEVAL_HID),mode_mask
+		bra	decode_opt_loop1
+
+	*  symbolic mode
+
+decode_symbolic_mode:
 		move.b	#$ff,mode_mask
 		clr.b	mode_plus
-decode_mode_loop1:
+decode_symbolic_mode_loop1:
 		move.b	(a0)+,d0
 		beq	decode_opt_loop1
 
 		cmp.b	#',',d0
-		beq	decode_mode_loop1
+		beq	decode_symbolic_mode_loop1
 
 		subq.l	#1,a0
-decode_mode_loop2:
+decode_symbolic_mode_loop2:
 		move.b	(a0)+,d0
 		cmp.b	#'u',d0
-		beq	decode_mode_loop2
+		beq	decode_symbolic_mode_loop2
 
 		cmp.b	#'g',d0
-		beq	decode_mode_loop2
+		beq	decode_symbolic_mode_loop2
 
 		cmp.b	#'o',d0
-		beq	decode_mode_loop2
+		beq	decode_symbolic_mode_loop2
 
 		cmp.b	#'a',d0
-		beq	decode_mode_loop2
-decode_mode_loop3:
+		beq	decode_symbolic_mode_loop2
+decode_symbolic_mode_loop3:
 		cmp.b	#'+',d0
-		beq	decode_mode_plus
+		beq	decode_symbolic_mode_plus
 
 		cmp.b	#'-',d0
-		beq	decode_mode_minus
+		beq	decode_symbolic_mode_minus
 
 		cmp.b	#'=',d0
 		bne	bad_arg
 
 		move.b	#(MODEVAL_VOL|MODEVAL_DIR|MODEVAL_LNK),mode_mask
 		clr.b	mode_plus
-decode_mode_plus:
-		bsr	decode_mode_sub
+decode_symbolic_mode_plus:
+		bsr	decode_symbolic_mode_sub
 		or.b	d1,mode_plus
-		bra	decode_mode_continue
+		bra	decode_symbolic_mode_continue
 
-decode_mode_minus:
-		bsr	decode_mode_sub
+decode_symbolic_mode_minus:
+		bsr	decode_symbolic_mode_sub
 		not.b	d1
 		and.b	d1,mode_mask
 		and.b	d1,mode_plus
-decode_mode_continue:
+decode_symbolic_mode_continue:
 		tst.b	d0
 		beq	decode_opt_loop1
 
 		cmp.b	#',',d0
-		beq	decode_mode_loop1
-		bra	decode_mode_loop3
+		beq	decode_symbolic_mode_loop1
+		bra	decode_symbolic_mode_loop3
 
-decode_mode_sub:
+decode_symbolic_mode_sub:
 		moveq	#0,d1
-decode_mode_sub_loop:
+decode_symbolic_mode_sub_loop:
 		move.b	(a0)+,d0
 		moveq	#MODEBIT_ARC,d2
 		cmp.b	#'a',d0
-		beq	decode_mode_sub_set
+		beq	decode_symbolic_mode_sub_set
 
 		moveq	#MODEBIT_SYS,d2
 		cmp.b	#'s',d0
-		beq	decode_mode_sub_set
+		beq	decode_symbolic_mode_sub_set
 
 		moveq	#MODEBIT_HID,d2
 		cmp.b	#'h',d0
-		beq	decode_mode_sub_set
+		beq	decode_symbolic_mode_sub_set
 
 		cmp.b	#'r',d0
-		beq	decode_mode_sub_loop
+		beq	decode_symbolic_mode_sub_loop
 
 		moveq	#MODEBIT_RDO,d2
 		cmp.b	#'w',d0
-		beq	decode_mode_sub_set
+		beq	decode_symbolic_mode_sub_set
 
 		moveq	#MODEBIT_EXE,d2
 		cmp.b	#'x',d0
-		beq	decode_mode_sub_set
+		beq	decode_symbolic_mode_sub_set
 
 		rts
 
-decode_mode_sub_set:
+decode_symbolic_mode_sub_set:
 		bset	d2,d1
-		bra	decode_mode_sub_loop
+		bra	decode_symbolic_mode_sub_loop
 
 decode_opt_done:
 		subq.l	#2,d7
@@ -324,26 +386,64 @@ decode_opt_done:
 	*
 		moveq	#0,d6				*  D6.W : エラー・コード
 	*
-	*  引数は 2個以上 -> targetを調べる
+	*  targetを調べる
 	*
-		movea.l	a0,a1				*  A1 : 1st source
+		movea.l	a0,a1				*  A1 : 1st arg
 		move.l	d7,d0
 find_target:
 		bsr	strfor1
 		subq.l	#1,d0
 		bcc	find_target
-							*  A0 : target
-		bsr	strip_excessive_slashes
+							*  A0 : target arg
+		bsr	strip_excessive_slashes		*  target arg を stripする
+		exg	a0,a1				*  A0 : 1st arg, A1 : target arg
+		movea.l	a0,a2
+		bsr	strfor1
+		exg	a0,a2				*  A2 : 2nd arg (if any)
+		bsr	strip_excessive_slashes		*  1st arg を stripする
+
+		exg	a0,a1
 		bsr	is_directory
-		exg	a0,a1				*  A0 : 1st source, A1 : target
+		exg	a0,a1
 		bmi	exit_program
 		bne	mv_into_dir
 
-		*  target はディレクトリではない
+	*  targetはディレクトリではない
 
 		tst.l	d7
-		beq	mv_source_to_target
+		bne	not_directory			*  ファイル引数が 3つ以上 .. エラー
+mv_source_to_target:
+		bsr	move_file
+exit_program:
+		move.w	d6,-(a7)
+		DOS	_EXIT2
 
+	*  targetはディレクトリ
+mv_into_dir:
+		tst.l	d7
+		bne	mv_into_dir_loop
+
+		bsr	is_identical
+		bne	mv_into_dir_loop
+
+		*  引数が 2つで同一 .. rename
+		bset	#FLAG_identical,d5
+		bra	mv_source_to_target
+
+mv_into_dir_loop:
+		bsr	move_into_dir
+		subq.l	#1,d7
+		bcs	exit_program
+
+		movea.l	a2,a0
+		bsr	strfor1
+		exg	a0,a2
+		bsr	strip_excessive_slashes
+		bra	mv_into_dir_loop
+****************************************************************
+not_directory:
+		*  targetが存在するなら「Not a directory」
+		*  targetが存在しないなら「No directory」
 		movea.l	a1,a0
 		bsr	lgetmode
 		lea	msg_not_a_directory(pc),a2
@@ -353,30 +453,6 @@ find_target:
 mv_error_exit:
 		bsr	werror_myname_word_colon_msg
 		bra	exit_program
-
-mv_source_to_target:
-		bsr	strip_excessive_slashes
-		bsr	move_file
-		bra	exit_program
-
-mv_into_dir:
-		tst.l	d7
-		bne	mv_into_dir_loop
-
-		bsr	is_identical
-		beq	mv_source_to_target
-mv_into_dir_loop:
-		movea.l	a0,a2
-		bsr	strfor1
-		exg	a0,a2				*  A2 : next arg
-		bsr	strip_excessive_slashes
-		bsr	move_into_dir
-		movea.l	a2,a0
-		subq.l	#1,d7
-		bcc	mv_into_dir_loop
-exit_program:
-		move.w	d6,-(a7)
-		DOS	_EXIT2
 
 bad_arg:
 		lea	msg_bad_arg(pc),a0
@@ -422,6 +498,7 @@ move_into_dir:
 		bmi	move_into_dir_done
 
 		exg	a0,a1
+		bclr	#FLAG_identical,d5
 		bsr	move_file
 move_into_dir_done:
 		movem.l	(a7)+,d0-d3/a0-a3
@@ -441,10 +518,13 @@ move_file:
 		bsr	lgetmode
 		bmi	perror
 
-		move.l	d0,d1				*  D1.L : source の mode
+		move.b	d0,source_mode
+
+		exg	a0,a1				*  A0:target, A1:source
+		btst	#FLAG_identical,d5
+		bne	move_file_new			*  rename(src,target) してかまわない
 
 		*  target を調べる
-		exg	a0,a1				*  A0:target, A1:source
 		bsr	lgetmode
 		move.l	d0,d2				*  D2.L : target の mode
 		bpl	move_file_target_exists
@@ -462,27 +542,29 @@ move_file:
 		bra	werror_myname_word_colon_msg
 
 move_file_target_exists:
-		bsr	is_identical			*  src と dest が同一なら
-		beq	move_file_new			*  rename(src,dest) してかまわない
+		bset	#FLAG_identical,d5
+		bsr	is_identical			*  src と target が同一なら
+		beq	move_file_new			*  rename(src,target) してかまわない
 
+		bclr	#FLAG_identical,d5
 		lea	msg_directory_exists(pc),a2
 		btst	#MODEBIT_DIR,d2			*  targetがディレクトリだと
-		bne	move_error			*  上書きできないのでエラー
+		bne	move_error_x			*  上書きできないのでエラー
 
-		btst	#MODEBIT_DIR,d1
+		btst.b	#MODEBIT_DIR,source_mode
 		bne	update_ok
 
 		btst	#FLAG_u,d5
 		beq	update_ok
 
 		bsr	lgetdate
-		bcc	update_ok
+		beq	update_ok
 
 		move.l	d0,d3				*  D3.L : target のタイム・スタンプ
 		exg	a0,a1
 		bsr	lgetdate			*  D0.L : source のタイム・スタンプ
 		exg	a0,a1
-		bcc	update_ok
+		beq	update_ok
 
 		cmp.l	d3,d0
 		bls	move_file_return
@@ -491,6 +573,7 @@ update_ok:
 		bne	move_file_return
 
 		*  target を削除する
+		move.b	d2,d0
 		bsr	unlink
 			* エラー処理省略
 		bra	move_file_new_ok
@@ -516,15 +599,81 @@ move_file_new_ok:
 		lea	12(a7),a7
 verbose_done:
 		exg	a0,a1				*  A0:source, A1:target
-		*  sourceを通常のファイルにchmodする
-		moveq	#MODEVAL_ARC,d0
-		bsr	lchmod
+		*
+		*  sourceがディレクトリなら
+		*
+		btst.b	#MODEBIT_DIR,source_mode
+		beq	source_dir_ok
+
+		*  mounted point でないかどうか調べる
+		move.l	a0,-(a7)
+		lea	pwd(pc),a0
+		bsr	getcwd				*  pwdに現在の作業ディレクトリを保存しておいて
+		bsr	chdir				*  pwdにchdirしてみる
+		movea.l	(a7)+,a0
+		bmi	no_current_directory		*  pwdにchdirできない -> 2度と戻れない -> エラーにしてしまう
+		bsr	chdir				*  sourceにchdirする
 		bmi	perror
 
-		*  sourceがディレクトリなら、ここで、targetをtargetにrenameしてみる
+		move.l	a0,-(a7)
+		lea	pathname_buf(pc),a0		*  pathname_bufに
+		bsr	getcwd				*  sourceの正規のパス名を記録する
+		lea	pwd(pc),a0			*  元の作業ディレクトリに
+		bsr	chdir				*  戻る
+		movea.l	(a7)+,a0
+		DOS	_CURDRV
+		move.w	d0,-(a7)
+		DOS	_CHGDRV
+		addq.l	#2,a7
+		move.l	d0,d2				*  D2.L : ドライブ数
+		lea	drivename_buffer(pc),a3
+		move.b	#'A',(a3)
+		move.b	#':',1(a3)
+		clr.b	2(a3)
+check_mount_loop:
+		pea	pwd(pc)
+		move.l	a3,-(a7)
+		clr.w	-(a7)
+		DOS	_ASSIGN
+		lea	10(a7),a7
+		not.l	d0
+		bpl	check_mount_next
+
+		movem.l	a0-a1,-(a7)
+		lea	pwd(pc),a0
+		bsr	bsltosl
+		lea	pathname_buf(pc),a1
+		bsr	strcmp
+		movem.l	(a7)+,a0-a1
+		beq	cannot_mv_current_directory
+check_mount_next:
+		addq.b	#1,(a3)
+		subq.l	#1,d2
+		bne	check_mount_loop
+source_dir_ok:
+		*
+		*  sourceが
+		*    書き込み禁止
+		*    システムファイル
+		*    ディレクトリ
+		*  なら通常のファイルにchmodする
+		*
+		move.b	source_mode,d0
+		move.b	d0,d3
+		and.b	#(MODEVAL_RDO|MODEVAL_SYS|MODEVAL_DIR),d0
+		beq	source_mode_ok
+
+		moveq	#MODEVAL_ARC,d0
+		move.b	d0,d3
+		bsr	lchmod
+		bmi	perror
+source_mode_ok:
+		*  ここで，D3.B : 今現在のsourceのmode
+
+		*  sourceがディレクトリならtargetをtargetにrenameしてみる
 		*  もし ENODIR が返されるなら、ディレクトリをそのサブディレクトリに
 		*  移動しようとしていることになる
-		btst	#MODEBIT_DIR,d1
+		btst.b	#MODEBIT_DIR,source_mode
 		beq	do_move_file
 
 		move.l	a1,-(a7)
@@ -543,45 +692,116 @@ do_move_file:
 		move.l	d0,d2
 		bmi	simple_move_failed
 
+		*  modeを設定する
 		movea.l	a1,a0
-		move.l	d1,d0
+		moveq	#0,d0
+		move.b	source_mode,d0
 		bsr	newmode
-		bsr	lchmod
+		bsr	chmodx
 		bmi	perror
-.if 0
-		btst	#MODEBIT_DIR,d1
+		*
+		*  ディレクトリを別の親ディレクトリに移動したのなら
+		*  .. が指す親を修正する
+		*
+		btst.b	#MODEBIT_DIR,source_mode
 		beq	move_file_return
 
-		lea	nameck_buffer(pc),a0
-		move.l	a0,-(a7)
-		move.l	a1,-(a7)
-		DOS	_NAMECK
-		addq.l	#8,a7
-		tst.l	d0
-		bmi	warning_mvdir
-
-		bsr	strip_excessive_slashes
-		bsr	getrealpath
-		bmi	warning_mvdir
-
-		bsr	lgetmode
-		bmi	warning_mvdir
-
-		btst	#MODEBIT_DIR,d0
-		beq	warning_mvdir
+		btst	#FLAG_identical,d5
+		bne	move_file_return
 
 		lea	target_fatchkbuf(pc),a2
 		bsr	fatchk
-.endif
+		bmi	move_file_return		*  targetはFAT管理されていない -> '..'の修正はしない
+
+		movea.l	a2,a3
+		lea	nameck_buffer(pc),a0
+		move.l	a0,-(a7)
+		move.l	a1,-(a7)
+		DOS	_NAMECK				*  親ディレクトリのパス名を得る
+		addq.l	#8,a7
+		tst.l	d0
+		bmi	resume_dotdot_fail
+
+		moveq	#0,d1
+		bsr	strlen
+		cmp.l	#3,d0
+		bls	parent_ok			*  親ディレクトリはルート・ディレクトリ
+
+		clr.b	-1(a0,d0.l)
+		lea	source_fatchkbuf(pc),a2
+		bsr	fatchk
+		bmi	parent_ok			*  親ディレクトリはFAT管理されていない -> ルート・ディレクトリということにしておく
+
+		move.w	(a2),d0
+		cmp.w	(a3),d0
+		bne	parent_ok			*  親ディレクトリとtargetのドライブが違う -> 親ディレクトリはルート・ディレクトリ
+
+		bsr	readdir				*  親ディレクトリを読む
+		bmi	resume_dotdot_fail
+
+		bsr	resume_drive_assign
+		movem.l	a0-a1,-(a7)
+		movea.l	a3,a0
+		lea	dot_entry(pc),a1
+		moveq	#16,d0
+		bsr	memcmp
+		movem.l	(a7)+,a0-a1
+		bne	parent_ok			*  親ディレクトリの最初のエントリが . でない .. ルート・ディレクトリということにしておく
+
+		move.w	26(a3),d1			*  D1.W : 親ディレクトリのFAT番号
+parent_ok:
+		lea	target_fatchkbuf(pc),a2
+		bsr	readdir				*  targetを読む
+		bmi	resume_dotdot_fail
+
+		movem.l	a0-a1,-(a7)
+		lea	32(a3),a0
+		lea	dotdot_entry(pc),a1
+		moveq	#16,d0
+		bsr	memcmp
+		movem.l	(a7)+,a0-a1
+		bne	resume_dotdot_done
+
+		cmp.w	58(a3),d1
+		beq	resume_dotdot_done
+
+		move.w	d1,58(a3)
+		move.l	#1,-(a7)
+		move.l	2(a2),-(a7)
+		move.w	0(a2),-(a7)
+		move.l	a3,d0
+		bset	#31,d0
+		move.l	d0,-(a7)
+		DOS	_DISKWRT
+		lea	14(a7),a7
+resume_dotdot_done:
+		bsr	resume_drive_assign
+		tst.l	d0
+		bne	resume_dotdot_fail
 move_file_return:
 		rts
+
+no_current_directory:
+		lea	pwd(pc),a0
+		lea	msg_no_current_directory(pc),a2
+		bra	werror_myname_word_colon_msg
+
+resume_dotdot_fail:
+		movea.l	a1,a0
+		lea	msg_resume_dotdot_fail(pc),a2
+		bra	werror_myname_word_colon_msg
+
+cannot_mv_current_directory:
+		lea	msg_cannot_move_current_dir(pc),a2
+		bra	move_error
 
 simple_move_failed:
 	*
 	*  エラー
 	*
-		move.l	d1,d0
-		bsr	lchmod				*  sourceのmodeを元に戻す
+		moveq	#0,d0
+		move.b	source_mode,d0
+		bsr	chmodx
 		bmi	perror
 	*
 	*  考えられる原因 :-
@@ -590,7 +810,6 @@ simple_move_failed:
 	*    ディレクトリが一杯 ... EDIRFULL
 	*    ドライブが異なる ... EBADDRV
 	*
-		exg	a0,a1				*  A0:target, A1:source
 		lea	msg_cannot_move_dir_to_its_sub(pc),a2
 		cmp.l	#ENODIR,d2
 		beq	move_error
@@ -608,10 +827,10 @@ simple_move_failed:
 		bne	move_error
 
 		lea	msg_cannot_move_dirvol_across(pc),a2
-		btst	#MODEBIT_VOL,d1
+		btst.b	#MODEBIT_VOL,source_mode
 		bne	move_error
 
-		btst	#MODEBIT_DIR,d1
+		btst.b	#MODEBIT_DIR,source_mode
 		bne	move_error
 	*
 	*  ドライブが異なる
@@ -622,7 +841,7 @@ simple_move_failed:
 		*
 		*  source を open する
 		*
-		exg	a0,a1				*  A0:source, A1:target
+		move.b	source_mode,d0
 		bsr	lopen				*  source をオープンする
 		bmi	perror
 
@@ -630,7 +849,8 @@ simple_move_failed:
 		*
 		*  target を create する
 		*
-		move.w	d1,d0
+		moveq	#0,d0
+		move.b	source_mode,d0
 		bsr	newmode
 		move.w	d0,-(a7)
 		move.l	a1,-(a7)			*  target file を
@@ -642,8 +862,8 @@ simple_move_failed:
 		*  ファイルの内容をコピーする
 		*
 copy_loop:
-		move.l	d4,-(a7)
-		move.l	a4,-(a7)
+		move.l	copy_buffer_size,-(a7)
+		move.l	copy_buffer_top,-(a7)
 		move.w	d2,-(a7)
 		DOS	_READ
 		lea	10(a7),a7
@@ -653,7 +873,7 @@ copy_loop:
 
 		move.l	d0,d3
 		move.l	d0,-(a7)
-		move.l	a4,-(a7)
+		move.l	copy_buffer_top,-(a7)
 		move.w	d1,-(a7)
 		DOS	_WRITE
 		lea	10(a7),a7
@@ -671,7 +891,7 @@ copy_file_contents_done:
 		*
 		move.w	d2,d0
 		bsr	fgetdate
-		bcc	copy_timestamp_done
+		beq	copy_timestamp_done
 
 		move.l	d0,-(a7)
 		move.w	d1,-(a7)
@@ -688,10 +908,12 @@ copy_timestamp_done:
 		*
 		*  source を削除する
 		*
+		move.b	source_mode,d0
 		bra	unlink
 
-move_error:
+move_error_x:
 		exg	a0,a1
+move_error:
 		bsr	werror_myname_and_msg
 		lea	msg_wo(pc),a0
 		bsr	werror
@@ -722,6 +944,11 @@ copy_file_perror_3:
 		bsr	fclose				*  close する
 		move.l	(a7)+,d0
 		bra	copy_file_perror_1
+*****************************************************************
+chmodx:
+		cmp.b	d3,d0
+		bne	lchmod
+		rts
 *****************************************************************
 confirm_replace:
 		*  標準入力が端末ならば，ボリューム・ラベル，シンボリック・リンク，
@@ -831,89 +1058,18 @@ malloc:
 		tst.l	d0
 		rts
 *****************************************************************
-unlink:
-		move.w	#MODEVAL_ARC,-(a7)
-		move.l	a0,-(a7)
-		DOS	_CHMOD
-		DOS	_DELETE
-		addq.l	#6,a7
-		rts
-*****************************************************************
-lgetmode:
-		moveq	#-1,d0
-lchmod:
-		move.w	d0,-(a7)
-		move.l	a0,-(a7)
-		DOS	_CHMOD
-		addq.l	#6,a7
-		tst.l	d0
-		rts
-*****************************************************************
-fclosex:
-		bpl	fclose
-		rts
-.if 0
-*****************************************************************
-* getrealpath - シンボリック・リンクの実体のパス名を得る
-*
-* CALL
-*      A0     パス名
-*
-* RETURN
-*      pathname_buf   (A0) がリンクなら，その実体のパス名
-*                     そうでなければ (A0) がコピーされる
-*
-*      D0.L   エラーなら負
-*      CCR    TST.L D0
-*****************************************************************
-getrealpath:
-		movem.l	d1/a0-a2,-(a7)
-		lea	pathname_buf(pc),a1
-		move.l	lndrv,d0
-		beq	getrealpath_thru
-
-		movea.l	d0,a2
-		movea.l	LNDRV_getrealpath(a2),a2
-		clr.l	-(a7)
-		DOS	_SUPER				*  スーパーバイザ・モードに切り換える
-		addq.l	#4,a7
-		move.l	d0,-(a7)			*  前の SSP の値
-		movem.l	d2-d7/a0-a6,-(a7)
-		move.l	a0,-(a7)
-		move.l	a1,-(a7)
-		jsr	(a2)
-		addq.l	#8,a7
-		movem.l	(a7)+,d2-d7/a0-a6
-		move.l	d0,d1
-		DOS	_SUPER				*  ユーザ・モードに戻す
-		addq.l	#4,a7
-		move.l	d1,d0
-		bra	getrealpath_return
-
-getrealpath_thru:
-		exg	a0,a1
-		bsr	strcpy
-		moveq	#0,d0
-getrealpath_return:
-		movem.l	(a7)+,d1/a0-a2
-		rts
-.endif
-*****************************************************************
 * lopen - 読み込みモードでファイルをオープンする
 *         シンボリック・リンクはリンク自体をオープンする
-*         デバイスはオープンしない
 *
 * CALL
-*      A0     オープンするファイル名
+*      A0     オープンするファイルのパス名
+*      D0.B   ファイルのmode（予め取得しておく）
 *
 * RETURN
 *      D0.L   オープンしたファイルハンドル．またはDOSエラー・コード
 *****************************************************************
 lopen:
 		movem.l	d1/a2-a3,-(a7)
-		bsr	lgetmode
-		bmi	lopen_return			*  ファイルは無い
-
 		btst	#MODEBIT_LNK,d0
 		beq	lopen_normal			*  SYMLINKではない -> 通常の OPEN
 
@@ -963,18 +1119,60 @@ lopen_return:
 		movem.l	(a7)+,d1/a2-a3
 		rts
 *****************************************************************
+fclosex:
+		bpl	fclose
+		rts
+*****************************************************************
+* unlink - ファイルを削除する
+*
+* CALL
+*      A0     ファイルのパス名
+*      D0.B   ファイルのmode（予め取得しておく）
+*****************************************************************
+unlink:
+		move.w	#MODEVAL_ARC,-(a7)
+		move.l	a0,-(a7)
+		and.b	#(MODEVAL_RDO|MODEVAL_SYS|MODEVAL_DIR),d0
+		beq	unlink_1
+
+		DOS	_CHMOD
+unlink_1:
+		DOS	_DELETE
+		addq.l	#6,a7
+		rts
+*****************************************************************
+lgetmode:
+		moveq	#-1,d0
+lchmod:
+		move.w	d0,-(a7)
+		move.l	a0,-(a7)
+		DOS	_CHMOD
+		addq.l	#6,a7
+		tst.l	d0
+		rts
+*****************************************************************
 fgetdate:
 		clr.l	-(a7)
 		move.w	d0,-(a7)
 		DOS	_FILEDATE
 		addq.l	#6,a7
-lgetdate_return:
+fgetdate_done:
+		tst.l	d0
+		beq	fgetdate_return
+
 		cmp.l	#$ffff0000,d0
+		blo	fgetdate_return
+fgetdate_fail:
+		moveq	#0,d0
+fgetdate_return:
 		rts
 *****************************************************************
 lgetdate:
+		bsr	lgetmode
+		bmi	fgetdate_fail
+
 		bsr	lopen
-		bmi	lgetdate_return
+		bmi	fgetdate_fail
 
 		move.l	d1,-(a7)
 		move.l	d0,d1
@@ -983,7 +1181,7 @@ lgetdate:
 		bsr	fclose
 		move.l	d1,d0
 		move.l	(a7)+,d1
-		bra	lgetdate_return
+		bra	fgetdate_done
 *****************************************************************
 * is_identical - 2つのファイルが同一かどうか調べる
 *
@@ -1028,6 +1226,70 @@ fatchk:
 		moveq	#0,d0
 fatchk_return:
 		tst.l	d0
+		rts
+*****************************************************************
+readdir:
+		bclr	#FLAG_assign_cleared,d5
+		lea	drivename_buffer(pc),a3
+		move.w	0(a2),d0
+		add.b	#'A'-1,d0
+		move.b	d0,(a3)
+		move.b	#':',1(a3)
+		clr.b	2(a3)
+		pea	pwd(pc)
+		move.l	a3,-(a7)
+		clr.w	-(a7)
+		DOS	_ASSIGN
+		lea	10(a7),a7
+		cmp.l	#$60,d0
+		bne	do_readdir
+
+		move.l	a3,-(a7)
+		move.w	#4,-(a7)
+		DOS	_ASSIGN
+		addq.l	#6,a7
+		bset	#FLAG_assign_cleared,d5
+do_readdir:
+		lea	dpb_buffer(pc),a3
+		move.l	a3,-(a7)
+		move.w	0(a2),-(a7)
+		DOS	_GETDPB
+		addq.l	#6,a7
+		tst.l	d0
+		bmi	readdir_fail
+
+		moveq	#0,d0
+		move.w	2(a3),d0
+		cmp.l	copy_buffer_size,d0
+		bhi	readdir_fail
+
+		move.l	#1,-(a7)
+		move.l	2(a2),-(a7)
+		move.w	0(a2),-(a7)
+		movea.l	copy_buffer_top,a3
+		move.l	a3,d0
+		bset	#31,d0
+		move.l	d0,-(a7)
+		DOS	_DISKRED
+		lea	14(a7),a7
+		tst.l	d0
+		bpl	readdir_return
+readdir_fail:
+		moveq	#-1,d0
+resume_drive_assign:
+		btst	#FLAG_assign_cleared,d5
+		beq	resume_drive_assign_done
+
+		move.l	d0,-(a7)
+		move.w	#$60,-(a7)
+		pea	pwd(pc)
+		pea	drivename_buffer(pc)
+		move.w	#1,-(a7)
+		DOS	_ASSIGN
+		lea	12(a7),a7
+		move.l	(a7)+,d0
+resume_drive_assign_done:
+readdir_return:
 		rts
 *****************************************************************
 is_chrdev:
@@ -1183,7 +1445,7 @@ perror_2:
 .data
 
 	dc.b	0
-	dc.b	'## mv 1.5 ##  Copyright(C)1992-93 by Itagaki Fumihiko',0
+	dc.b	'## mv 1.6 ##  Copyright(C)1992-93 by Itagaki Fumihiko',0
 
 .even
 perror_table:
@@ -1238,6 +1500,7 @@ msg_too_few_args:		dc.b	'引数が足りません',0
 msg_too_long_pathname:		dc.b	'パス名が長過ぎます',0
 msg_nodir:			dc.b	'ディレクトリがありません',0
 msg_not_a_directory:		dc.b	'ディレクトリではありません',0
+msg_no_current_directory:	dc.b	'カレント・ディレクトリがありません',0
 msg_destination:		dc.b	' の移動先 ',0
 msg_ni:				dc.b	' に',0
 msg_readonly:			dc.b	'書き込み禁止',0
@@ -1253,33 +1516,43 @@ msg_cannot_move:		dc.b	' に移動できません',0
 msg_directory_exists:		dc.b	'; 移動先にディレクトリが存在しています',0
 msg_cannot_move_dir_to_its_sub:	dc.b	'; ディレクトリをそのサブディレクトリ下に移動することはできません',0
 msg_cannot_move_dirvol_across:	dc.b	'; ディレクトリやボリューム・ラベルを別のドライブに移動することはできません',0
+msg_cannot_move_current_dir:	dc.b	'; 各ドライブのカレント・ディレクトリを移動することはできません',0
 msg_drive_differ:		dc.b	'; ドライブが異なります',0
+msg_resume_dotdot_fail:		dc.b	'.. を修正できませんでした',0
 msg_usage:			dc.b	CR,LF
 	dc.b	'使用法:  mv [-Ifiuvx] [-m <属性変更式>] [--] <旧パス名> <新パス名>',CR,LF
 	dc.b	'         mv [-Iefiuvx] [-m <属性変更式>] [--] <ファイル> ... <移動先>',CR,LF,CR,LF
-	dc.b	'         属性変更式: {[ugoa]{{+-=}[ashrwx]}...}[,...]'
+	dc.b	'         属性変更式: {[ugoa]{{+-=}[ashrwx]}...}[,...] または 8進数値表現'
 msg_newline:			dc.b	CR,LF
 msg_nul:			dc.b	0
 msg_arrow:			dc.b	' -> ',0
 dos_wildcard_all:		dc.b	'*.*',0
+dot_entry:			dc.b	'.          ',$10,0,0,0,0,0,0,0,0,0,0
+dotdot_entry:			dc.b	'..         ',$10,0,0,0,0,0,0,0,0,0,0
 *****************************************************************
 .bss
 
 .even
 lndrv:			ds.l	1
+copy_buffer_top:	ds.l	1
+copy_buffer_size:	ds.l	1
 .even
 source_fatchkbuf:	ds.b	14+8			*  +8 : fatchkバグ対策
 .even
 target_fatchkbuf:	ds.b	14+8			*  +8 : fatchkバグ対策
 .even
+dpb_buffer:		ds.b	94
+.even
 filesbuf:		ds.b	STATBUFSIZE
 .even
 getsbuf:		ds.b	2+GETSLEN+1
 pathname_buf:		ds.b	128
+pwd:			ds.b	MAXPATH+1
 new_pathname:		ds.b	MAXPATH+1
-nameck_buffer1:		ds.b	91
-nameck_buffer2:		ds.b	91
+nameck_buffer:		ds.b	91
+drivename_buffer:	ds.b	3
 stdin_is_terminal:	ds.b	1
+source_mode:		ds.b	1
 mode_mask:		ds.b	1
 mode_plus:		ds.b	1
 .even
