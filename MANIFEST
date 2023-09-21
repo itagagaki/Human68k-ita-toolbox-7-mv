@@ -1,0 +1,6 @@
+MANIFEST       このファイル
+README         まず最初にお読み下さい
+NOTICE         版権と許諾についての告示書
+CHANGES        mvのモデルチェンジの履歴
+mv.1           mvのマニュアル
+mv.x           mv実行ファイル

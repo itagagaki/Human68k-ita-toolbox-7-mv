@@ -32,6 +32,9 @@
 * Itagaki Fumihiko 11-Sep-94  ˆÚ“®‚µ‚æ‚¤‚Æ‚·‚éƒfƒBƒŒƒNƒgƒŠ‚ªŠeƒhƒ‰ƒCƒu‚ÌƒJƒŒƒ“ƒgEƒfƒBƒŒƒNƒgƒŠ
 *                             ‚Å‚È‚¢‚©‚Ç‚¤‚©‚ğƒ`ƒFƒbƒN‚·‚é•û–@‚ğ•ÏX
 * 1.7
+* Itagaki Fumihiko 10-Jun-95  ‘½dmount‘Î‰
+* Itagaki Fumihiko 10-Jun-95  ƒGƒ‰[ƒ`ƒFƒbƒN‹­‰»
+* 1.8
 *
 * Usage: mv [ -Ifiuvx ] [ -m mode ] [ -- ] <ƒtƒ@ƒCƒ‹1> <ƒtƒ@ƒCƒ‹2>
 *        mv [ -Ifiuvx ] [ -m mode ] [ -- ] <ƒfƒBƒŒƒNƒgƒŠ1> <ƒfƒBƒŒƒNƒgƒŠ2>
@@ -49,6 +52,8 @@
 .xref strlen
 .xref strfor1
 .xref memcmp
+.xref memmovd
+.xref memmovi
 .xref headtail
 .xref cat_pathname
 .xref strip_excessive_slashes
@@ -430,7 +435,9 @@ mv_into_dir:
 		bra	mv_source_to_target
 
 mv_into_dir_loop:
+		move.l	a2,-(a7)
 		bsr	move_into_dir
+		movea.l	(a7)+,a2
 		subq.l	#1,d7
 		bcs	exit_program
 
@@ -483,10 +490,12 @@ mv_error_exit_3:
 *      A0 ‚Å¦‚³‚ê‚éƒGƒ“ƒgƒŠ‚ğ A1 ‚Å¦‚³‚ê‚éƒfƒBƒŒƒNƒgƒŠ‰º‚ÉˆÚ“®‚·‚é
 *
 * RETURN
-*      none
+*      D0-D3/A0-A3   ”j‰ó
 *****************************************************************
+move_into_dir_done:
+		rts
+
 move_into_dir:
-		movem.l	d0-d3/a0-a3,-(a7)
 		movea.l	a1,a2
 		bsr	headtail
 		exg	a1,a2				*  A2 : tail of source
@@ -498,10 +507,7 @@ move_into_dir:
 
 		exg	a0,a1
 		bclr	#FLAG_identical,d5
-		bsr	move_file
-move_into_dir_done:
-		movem.l	(a7)+,d0-d3/a0-a3
-		rts
+		*bra	move_file
 *****************************************************************
 * move_file - ƒtƒ@ƒCƒ‹‚ğˆÚ“®‚·‚é
 *
@@ -510,7 +516,7 @@ move_into_dir_done:
 *      A1     target path
 *
 * RETURN
-*      D0-D3/A0-A5  ”j‰ó
+*      D0-D3/A0-A3   ”j‰ó
 *****************************************************************
 move_file:
 		*  source ‚ğ’²‚×‚é
@@ -610,33 +616,28 @@ verbose_done:
 		bsr	fatchk
 		bmi	source_dir_ok
 
-		DOS	_CURDRV			*
-		move.w	d0,-(a7)		*
-		DOS	_CHGDRV			*  ƒhƒ‰ƒCƒu”‚ğ“¾‚é
-		addq.l	#2,a7			*
-		move.l	d0,d2				*  D2.L : ƒhƒ‰ƒCƒu”
-
-		lea	drivename_buffer(pc),a4
-		move.b	#'A',(a4)
-		move.b	#':',1(a4)
-		clr.b	2(a4)
-		lea	pathname_buf(pc),a5
+		DOS	_CURDRV				*
+		move.w	d0,-(a7)			*
+		DOS	_CHGDRV				*  ƒhƒ‰ƒCƒu”‚ğ“¾‚é
+		addq.l	#2,a7				*
+		move.b	d0,d2				*  D2.L : ƒhƒ‰ƒCƒu”
 check_mount_loop:
-		move.l	a5,-(a7)
-		move.l	a4,-(a7)
-		clr.w	-(a7)
-		DOS	_ASSIGN
-		lea	10(a7),a7
+		move.b	d2,d0
+		bsr	get_drive_assign
 		not.l	d0
 		bpl	check_mount_next
 
-		tst.b	3(a5)
+		tst.b	assign_pathname+3
 		beq	check_mount_next
 
+		bsr	trace_assign_pathname
+		bmi	perror
+
 		lea	target_fatchkbuf(pc),a2
-		exg	a0,a5
+		move.l	a0,-(a7)
+		lea	assign_pathname(pc),a0
 		bsr	fatchk
-		exg	a0,a5
+		move.l	(a7)+,a0
 		bmi	check_mount_next
 
 		lea	source_fatchkbuf(pc),a3
@@ -646,8 +647,7 @@ check_mount_loop:
 		cmpm.l	(a2)+,(a3)+
 		beq	cannot_mv_current_directory
 check_mount_next:
-		addq.b	#1,(a4)
-		subq.l	#1,d2
+		subq.b	#1,d2
 		bne	check_mount_loop
 source_dir_ok:
 		*
@@ -1222,26 +1222,111 @@ fatchk_return:
 		tst.l	d0
 		rts
 *****************************************************************
+* get_drive_assign
+*
+* CALL
+*      D0.B   ƒhƒ‰ƒCƒu”Ô†(1='A:', 2='B:', 3='C:', ...)
+*      A0     curdirŠi”[ƒoƒbƒtƒ@
+*
+* RETURN
+*      D0.L   DOS _ASSIGN ƒŠƒ^[ƒ“ƒR[ƒh
+*
+* DESCRIPTION
+*      drivename_buffer ‚Éƒhƒ‰ƒCƒu–¼‚ğƒZƒbƒg‚·‚é.
+*      assign_pathname ‚É‚»‚Ìƒhƒ‰ƒCƒu‚Ìassign pathname‚ğæ“¾‚·‚é.
+*****************************************************************
+get_drive_assign:
+		move.l	a0,-(a7)
+		lea	drivename_buffer(pc),a0
+		add.b	#'A'-1,d0
+		move.b	d0,(a0)+
+		move.b	#':',(a0)+
+		clr.b	(a0)
+		movea.l	(a7)+,a0
+		pea	assign_pathname(pc)		*
+		pea	drivename_buffer(pc)		*
+		clr.w	-(a7)				*
+		DOS	_ASSIGN				*  assignæ“¾
+		lea	10(a7),a7			*
+		rts
+*****************************************************************
+trace_assign_pathname:
+		movem.l	d1/a0-a3,-(a7)
+		lea	assign_pathname(pc),a2
+		lea	pathname_buf(pc),a3
+trace_assign_loop:
+		clr.b	2(a2)
+		move.l	a3,-(a7)			*
+		move.l	a2,-(a7)			*
+		clr.w	-(a7)				*
+		DOS	_ASSIGN				*  assignæ“¾
+		lea	10(a7),a7			*
+		move.b	#'\',2(a2)
+		cmp.l	#$60,d0
+		bne	trace_assign_pathname_done
+
+		move.b	(a3),d0
+		cmp.b	(a2),d0
+		beq	trace_assign_pathname_error
+
+		tst.b	3(a3)
+		bne	trace_assign_1
+
+		move.b	d0,(a2)
+		bra	trace_assign_loop
+
+trace_assign_1:
+		movea.l	a2,a0
+		bsr	strfor1
+		movea.l	a0,a1
+		movea.l	a3,a0
+		bsr	strlen
+		move.l	d0,d1
+		subq.l	#2,d0
+		lea	(a1,d0.l),a0
+		move.l	a0,d0
+		sub.l	a2,d0
+		cmp.l	#MAXPATH+1,d0
+		bhi	trace_assign_pathname_error
+
+		move.l	a1,d0
+		sub.l	a2,d0
+		subq.l	#2,d0
+		bsr	memmovd
+		movea.l	a3,a1
+		movea.l	a2,a0
+		move.l	d1,d0
+		bsr	memmovi
+		bra	trace_assign_loop
+
+trace_assign_pathname_done:
+		moveq	#0,d0
+trace_assign_pathname_return:
+		movem.l	(a7)+,d1/a0-a3
+		tst.l	d0
+		rts
+
+trace_assign_pathname_error:
+		moveq	#EBADDRV,d0
+		bra	trace_assign_pathname_return
+*****************************************************************
 readdir:
 		bclr	#FLAG_assign_cleared,d5
-		lea	drivename_buffer(pc),a3
-		move.w	0(a2),d0
-		add.b	#'A'-1,d0
-		move.b	d0,(a3)
-		move.b	#':',1(a3)
-		clr.b	2(a3)
-		pea	pathname_buf(pc)
-		move.l	a3,-(a7)
-		clr.w	-(a7)
-		DOS	_ASSIGN
-		lea	10(a7),a7
+		move.w	(a2),d0
+		bsr	get_drive_assign
 		cmp.l	#$60,d0
 		bne	do_readdir
 
-		move.l	a3,-(a7)
-		move.w	#4,-(a7)
-		DOS	_ASSIGN
-		addq.l	#6,a7
+		bsr	trace_assign_pathname
+		bmi	readdir_fail
+
+		pea	drivename_buffer(pc)		*
+		move.w	#4,-(a7)			*
+		DOS	_ASSIGN				*  assign‰ğœ
+		addq.l	#6,a7				*
+		tst.l	d0
+		bmi	readdir_fail
+
 		bset	#FLAG_assign_cleared,d5
 do_readdir:
 		lea	dpb_buffer(pc),a3
@@ -1267,7 +1352,11 @@ do_readdir:
 		DOS	_DISKRED
 		lea	14(a7),a7
 		tst.l	d0
-		bpl	readdir_return
+		bmi	readdir_fail
+
+		moveq	#0,d0
+		rts
+
 readdir_fail:
 		moveq	#-1,d0
 resume_drive_assign:
@@ -1276,14 +1365,23 @@ resume_drive_assign:
 
 		move.l	d0,-(a7)
 		move.w	#$60,-(a7)
-		pea	pathname_buf(pc)
-		pea	drivename_buffer(pc)
-		move.w	#1,-(a7)
-		DOS	_ASSIGN
-		lea	12(a7),a7
+		pea	assign_pathname(pc)		*
+		pea	drivename_buffer(pc)		*
+		move.w	#1,-(a7)			*
+		DOS	_ASSIGN				*  assignÀs
+		lea	12(a7),a7			*
+		tst.l	d0
+		bpl	resume_drive_assign_ok
+
+		movem.l	a0/a2,-(a7)
+		lea	drivename_buffer(pc),a0
+		lea	msg_could_not_remount(pc),a2
+		bsr	werror_myname_word_colon_msg
+		movem.l	(a7)+,a0/a2
+resume_drive_assign_ok:
 		move.l	(a7)+,d0
 resume_drive_assign_done:
-readdir_return:
+		tst.l	d0
 		rts
 *****************************************************************
 is_chrdev:
@@ -1439,7 +1537,7 @@ perror_2:
 .data
 
 	dc.b	0
-	dc.b	'## mv 1.7 ##  Copyright(C)1992-94 by Itagaki Fumihiko',0
+	dc.b	'## mv 1.8 ##  Copyright(C)1992-95 by Itagaki Fumihiko',0
 
 .even
 perror_table:
@@ -1512,6 +1610,8 @@ msg_cannot_move_dirvol_across:	dc.b	'; ƒfƒBƒŒƒNƒgƒŠ‚âƒ{ƒŠƒ…[ƒ€Eƒ‰ƒxƒ‹‚ğ•Ê‚Ìƒhƒ
 msg_cannot_move_current_dir:	dc.b	'; Šeƒhƒ‰ƒCƒu‚ÌƒJƒŒƒ“ƒgEƒfƒBƒŒƒNƒgƒŠ‚ğˆÚ“®‚·‚é‚±‚Æ‚Í‚Å‚«‚Ü‚¹‚ñ',0
 msg_drive_differ:		dc.b	'; ƒhƒ‰ƒCƒu‚ªˆÙ‚È‚è‚Ü‚·',0
 msg_resume_dotdot_fail:		dc.b	'.. ‚ğC³‚Å‚«‚Ü‚¹‚ñ‚Å‚µ‚½',0
+msg_could_not_remount:		dc.b	'umount‚³‚ê‚Ü‚µ‚½i•œ‹Œ‚Å‚«‚Ü‚¹‚ñ‚Å‚µ‚½j',0
+
 msg_usage:			dc.b	CR,LF
 	dc.b	'g—p–@:  mv [-Ifiuvx] [-m <‘®«•ÏX®>] [--] <‹ŒƒpƒX–¼> <VƒpƒX–¼>',CR,LF
 	dc.b	'         mv [-Iefiuvx] [-m <‘®«•ÏX®>] [--] <ƒtƒ@ƒCƒ‹> ... <ˆÚ“®æ>',CR,LF,CR,LF
@@ -1541,6 +1641,7 @@ filesbuf:		ds.b	STATBUFSIZE
 getsbuf:		ds.b	2+GETSLEN+1
 pathname_buf:		ds.b	128
 new_pathname:		ds.b	MAXPATH+1
+assign_pathname:	ds.b	MAXPATH+1
 nameck_buffer:		ds.b	91
 drivename_buffer:	ds.b	3
 stdin_is_terminal:	ds.b	1

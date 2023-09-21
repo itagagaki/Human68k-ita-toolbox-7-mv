@@ -9,8 +9,8 @@ RM      = -rm -f
 INCLUDE = $(HOME)/fish/include
 
 DESTDIR   = A:/usr/ita
-BACKUPDIR = B:/mv/1.7
-RELEASE_ARCHIVE = MV17
+BACKUPDIR = B:/mv/1.8
+RELEASE_ARCHIVE = MV18
 RELEASE_FILES = MANIFEST README ../NOTICE CHANGES mv.1 mv.x
 
 EXTLIB = ../lib/getlnenv.o $(HOME)/fish/lib/ita.l
