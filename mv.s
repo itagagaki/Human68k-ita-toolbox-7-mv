@@ -6,10 +6,27 @@
 *                             strip_excessive_slashesのバグfixに伴う改版．
 *                             些細なメッセージ変更．
 * 1.3
+* Itagaki Fumihiko 16-Dec-92  引数が 2つ（mv a b）のとき，b が存在するディ
+*                             レクトリであっても，a と b が同じエントリを
+*                             指すパス名である場合には特別に mv d1 d2 の形
+*                             式として処理するようにした．これでディレクト
+*                             リに対しても CASE.X と同じこと（同じ綴りのま
+*                             ま大文字／小文字を変更する）が可能になった．
+* Itagaki Fumihiko 27-Dec-92  -I オプションの追加．
+* Itagaki Fumihiko 27-Dec-92  -m オプションの追加．
+* 1.4
+* Itagaki Fumihiko 10-Jan-93  GETPDB -> lea $10(a0),a0
+* Itagaki Fumihiko 12-Jan-93  -e オプションの追加．
+* Itagaki Fumihiko 20-Jan-93  引数 - と -- の扱いの変更
+* Itagaki Fumihiko 22-Jan-93  スタックを拡張
+* Itagaki Fumihiko 24-Jan-93  v1.4 での identical check が正常に行われない
+*                             エンバグを修正
+* Itagaki Fumihiko 25-Jan-93  エラー・メッセージの修正
+* 1.5
 *
-* Usage: mv [ -fiuvx ] <ファイル1> <ファイル2>
-*        mv [ -fiuvx ] <ディレクトリ1> <ディレクトリ2>
-*        mv [ -fiuvx ] <ファイル> ... <ディレクトリ>
+* Usage: mv [ -Ifiuvx ] [ -m {[ugoa]{{+-=}[ashrwx]}...}[,...] ] [ -- ] <ファイル1> <ファイル2>
+*        mv [ -Ifiuvx ] [ -m {[ugoa]{{+-=}[ashrwx]}...}[,...] ] [ -- ] <ディレクトリ1> <ディレクトリ2>
+*        mv [ -Iefiuvx ] [ -m {[ugoa]{{+-=}[ashrwx]}...}[,...] ] [ -- ] <ファイル> ... <ディレクトリ>
 
 .include doscall.h
 .include error.h
@@ -30,14 +47,16 @@
 
 REQUIRED_OSVER	equ	$200			*  2.00以降
 
-STACKSIZE	equ	4096
+STACKSIZE	equ	16384			*  スーパーバイザモードでは15KB以上必要
 GETSLEN		equ	32
 
 FLAG_f		equ	0
 FLAG_i		equ	1
-FLAG_u		equ	2
-FLAG_v		equ	3
-FLAG_x		equ	4
+FLAG_I		equ	2
+FLAG_u		equ	3
+FLAG_v		equ	4
+FLAG_x		equ	5
+FLAG_e		equ	6
 
 LNDRV_O_CREATE		equ	4*2
 LNDRV_O_OPEN		equ	4*3
@@ -61,13 +80,12 @@ start:
 		bra.s	start1
 		dc.b	'#HUPAIR',0
 start1:
-		lea	stack_bottom,a7			*  A7 := スタックの底
+		lea	stack_bottom(pc),a7		*  A7 := スタックの底
 		DOS	_VERNUM
 		cmp.w	#REQUIRED_OSVER,d0
 		bcs	dos_version_mismatch
 
-		DOS	_GETPDB
-		movea.l	d0,a0				*  A0 : PDBアドレス
+		lea	$10(a0),a0			*  A0 : PDBアドレス
 		move.l	a7,d0
 		sub.l	a0,d0
 		move.l	d0,-(a7)
@@ -109,6 +127,8 @@ start1:
 		bsr	DecodeHUPAIR			*  引数をデコードする
 		movea.l	a1,a0				*  A0 : 引数ポインタ
 		move.l	d0,d7				*  D7.L : 引数カウンタ
+		move.b	#$ff,mode_mask
+		clr.b	mode_plus
 		moveq	#0,d5				*  D5.L : flags
 decode_opt_loop1:
 		tst.l	d7
@@ -117,16 +137,28 @@ decode_opt_loop1:
 		cmpi.b	#'-',(a0)
 		bne	decode_opt_done
 
+		tst.b	1(a0)
+		beq	decode_opt_done
+
 		subq.l	#1,d7
 		addq.l	#1,a0
 		move.b	(a0)+,d0
+		cmp.b	#'-',d0
+		bne	decode_opt_loop2
+
+		tst.b	(a0)+
 		beq	decode_opt_done
+
+		subq.l	#1,a0
 decode_opt_loop2:
 		cmp.b	#'f',d0
 		beq	set_option_f
 
 		cmp.b	#'i',d0
 		beq	set_option_i
+
+		cmp.b	#'I',d0
+		beq	set_option_I
 
 		moveq	#FLAG_u,d1
 		cmp.b	#'u',d0
@@ -139,6 +171,13 @@ decode_opt_loop2:
 		moveq	#FLAG_x,d1
 		cmp.b	#'x',d0
 		beq	set_option
+
+		moveq	#FLAG_e,d1
+		cmp.b	#'e',d0
+		beq	set_option
+
+		cmp.b	#'m',d0
+		beq	decode_mode
 
 		moveq	#1,d1
 		tst.b	(a0)
@@ -158,14 +197,17 @@ bad_option_1:
 		lea	10(a7),a7
 		bra	usage
 
-set_option_f:
-		bset	#FLAG_f,d5
-		bclr	#FLAG_i,d5
-		bra	set_option_done
-
+set_option_I:
+		bset	#FLAG_I,d5
 set_option_i:
 		bset	#FLAG_i,d5
 		bclr	#FLAG_f,d5
+		bra	set_option_done
+
+set_option_f:
+		bset	#FLAG_f,d5
+		bclr	#FLAG_i,d5
+		bclr	#FLAG_I,d5
 		bra	set_option_done
 
 set_option:
@@ -174,6 +216,99 @@ set_option_done:
 		move.b	(a0)+,d0
 		bne	decode_opt_loop2
 		bra	decode_opt_loop1
+
+decode_mode:
+		tst.b	(a0)+
+		bne	bad_arg
+
+		subq.l	#1,d7
+		bcs	too_few_args
+
+		move.b	#$ff,mode_mask
+		clr.b	mode_plus
+decode_mode_loop1:
+		move.b	(a0)+,d0
+		beq	decode_opt_loop1
+
+		cmp.b	#',',d0
+		beq	decode_mode_loop1
+
+		subq.l	#1,a0
+decode_mode_loop2:
+		move.b	(a0)+,d0
+		cmp.b	#'u',d0
+		beq	decode_mode_loop2
+
+		cmp.b	#'g',d0
+		beq	decode_mode_loop2
+
+		cmp.b	#'o',d0
+		beq	decode_mode_loop2
+
+		cmp.b	#'a',d0
+		beq	decode_mode_loop2
+decode_mode_loop3:
+		cmp.b	#'+',d0
+		beq	decode_mode_plus
+
+		cmp.b	#'-',d0
+		beq	decode_mode_minus
+
+		cmp.b	#'=',d0
+		bne	bad_arg
+
+		move.b	#(MODEVAL_VOL|MODEVAL_DIR|MODEVAL_LNK),mode_mask
+		clr.b	mode_plus
+decode_mode_plus:
+		bsr	decode_mode_sub
+		or.b	d1,mode_plus
+		bra	decode_mode_continue
+
+decode_mode_minus:
+		bsr	decode_mode_sub
+		not.b	d1
+		and.b	d1,mode_mask
+		and.b	d1,mode_plus
+decode_mode_continue:
+		tst.b	d0
+		beq	decode_opt_loop1
+
+		cmp.b	#',',d0
+		beq	decode_mode_loop1
+		bra	decode_mode_loop3
+
+decode_mode_sub:
+		moveq	#0,d1
+decode_mode_sub_loop:
+		move.b	(a0)+,d0
+		moveq	#MODEBIT_ARC,d2
+		cmp.b	#'a',d0
+		beq	decode_mode_sub_set
+
+		moveq	#MODEBIT_SYS,d2
+		cmp.b	#'s',d0
+		beq	decode_mode_sub_set
+
+		moveq	#MODEBIT_HID,d2
+		cmp.b	#'h',d0
+		beq	decode_mode_sub_set
+
+		cmp.b	#'r',d0
+		beq	decode_mode_sub_loop
+
+		moveq	#MODEBIT_RDO,d2
+		cmp.b	#'w',d0
+		beq	decode_mode_sub_set
+
+		moveq	#MODEBIT_EXE,d2
+		cmp.b	#'x',d0
+		beq	decode_mode_sub_set
+
+		rts
+
+decode_mode_sub_set:
+		bset	d2,d1
+		bra	decode_mode_sub_loop
 
 decode_opt_done:
 		subq.l	#2,d7
@@ -200,21 +335,36 @@ find_target:
 							*  A0 : target
 		bsr	strip_excessive_slashes
 		bsr	is_directory
+		exg	a0,a1				*  A0 : 1st source, A1 : target
 		bmi	exit_program
 		bne	mv_into_dir
 
 		*  target はディレクトリではない
 
 		tst.l	d7
-		bne	bad_destination
+		beq	mv_source_to_target
 
-		exg	a0,a1				*  A0 : 1st source, A1 : target
+		movea.l	a1,a0
+		bsr	lgetmode
+		lea	msg_not_a_directory(pc),a2
+		bpl	mv_error_exit
+
+		lea	msg_nodir(pc),a2
+mv_error_exit:
+		bsr	werror_myname_word_colon_msg
+		bra	exit_program
+
+mv_source_to_target:
 		bsr	strip_excessive_slashes
 		bsr	move_file
 		bra	exit_program
-****************
+
 mv_into_dir:
-		exg	a0,a1				*  A0 : 1st source, A1 : target
+		tst.l	d7
+		bne	mv_into_dir_loop
+
+		bsr	is_identical
+		beq	mv_source_to_target
 mv_into_dir_loop:
 		movea.l	a0,a2
 		bsr	strfor1
@@ -228,18 +378,13 @@ exit_program:
 		move.w	d6,-(a7)
 		DOS	_EXIT2
 
-bad_destination:
-		lea	msg_not_a_directory(pc),a2
-		bsr	lgetmode
-		bpl	mv_error_exit
-
-		lea	msg_nodir(pc),a2
-mv_error_exit:
-		bsr	werror_myname_word_colon_msg
-		bra	exit_program
+bad_arg:
+		lea	msg_bad_arg(pc),a0
+		bra	arg_error
 
 too_few_args:
 		lea	msg_too_few_args(pc),a0
+arg_error:
 		bsr	werror_myname_and_msg
 usage:
 		lea	msg_usage(pc),a0
@@ -282,13 +427,11 @@ move_into_dir_done:
 		movem.l	(a7)+,d0-d3/a0-a3
 		rts
 *****************************************************************
-* move_file
-*
-*      A0 で示されるパスのファイルを A1 で示されるパスに移動する
+* move_file - ファイルを移動する
 *
 * CALL
-*      A0     source
-*      A1     target
+*      A0     source path
+*      A1     target path
 *
 * RETURN
 *      D0-D3/A0-A3  破壊
@@ -319,26 +462,12 @@ move_file:
 		bra	werror_myname_word_colon_msg
 
 move_file_target_exists:
-		*  targetが存在する
+		bsr	is_identical			*  src と dest が同一なら
+		beq	move_file_new			*  rename(src,dest) してかまわない
 
-		*  targetがsourceと同一なら，それは存在しないものと見なす
-		lea	target_fatchkbuf(pc),a2
-		bsr	fatchk
-		movea.l	a2,a3
-		lea	source_fatchkbuf(pc),a2
-		exg	a0,a1
-		bsr	fatchk
-		exg	a0,a1
-		cmpm.w	(a2)+,(a3)+
-		bne	move_file_not_identical
-
-		cmpm.l	(a2)+,(a3)+
-		beq	move_file_new
-move_file_not_identical:
-		*  targetがディレクトリならエラー
 		lea	msg_directory_exists(pc),a2
-		btst	#MODEBIT_DIR,d2
-		bne	move_error
+		btst	#MODEBIT_DIR,d2			*  targetがディレクトリだと
+		bne	move_error			*  上書きできないのでエラー
 
 		btst	#MODEBIT_DIR,d1
 		bne	update_ok
@@ -358,13 +487,21 @@ move_file_not_identical:
 		cmp.l	d3,d0
 		bls	move_file_return
 update_ok:
-		bsr	confirm_file
+		bsr	confirm_replace
 		bne	move_file_return
 
 		*  target を削除する
 		bsr	unlink
 			* エラー処理省略
+		bra	move_file_new_ok
+
 move_file_new:
+		btst	#FLAG_I,d5
+		beq	move_file_new_ok
+
+		bsr	confirm_move
+		bne	move_file_return
+move_file_new_ok:
 		btst	#FLAG_v,d5
 		beq	verbose_done
 
@@ -408,6 +545,7 @@ do_move_file:
 
 		movea.l	a1,a0
 		move.l	d1,d0
+		bsr	newmode
 		bsr	lchmod
 		bmi	perror
 .if 0
@@ -457,11 +595,11 @@ simple_move_failed:
 		cmp.l	#ENODIR,d2
 		beq	move_error
 
-		lea	msg_file_exists(pc),a2
+		lea	msg_semicolon_file_exists(pc),a2
 		cmp.l	#EMVEXISTS,d2
 		beq	move_error
 
-		lea	msg_directory_full(pc),a2
+		lea	msg_semicolon_directory_full(pc),a2
 		cmp.l	#EDIRFULL,d2
 		beq	move_error
 
@@ -492,7 +630,9 @@ simple_move_failed:
 		*
 		*  target を create する
 		*
-		move.w	d1,-(a7)			*  source の mode で
+		move.w	d1,d0
+		bsr	newmode
+		move.w	d0,-(a7)
 		move.l	a1,-(a7)			*  target file を
 		DOS	_CREATE				*  作成する
 		addq.l	#6,a7				*  （ドライブの検査は済んでいる）
@@ -583,7 +723,7 @@ copy_file_perror_3:
 		move.l	(a7)+,d0
 		bra	copy_file_perror_1
 *****************************************************************
-confirm_file:
+confirm_replace:
 		*  標準入力が端末ならば，ボリューム・ラベル，シンボリック・リンク，
 		*  読み込み専用，隠し，システムのどれかの属性ビットがONである場合，
 		*  問い合わせる
@@ -603,6 +743,8 @@ confirm:
 
 		bsr	werror_myname
 		move.l	a0,-(a7)
+		move.l	a1,a0
+		bsr	werror
 		lea	msg_destination(pc),a0
 		bsr	werror
 		movea.l	(a7),a0
@@ -639,7 +781,8 @@ confirm_4:
 		lea	msg_file(pc),a0
 confirm_5:
 		bsr	werror
-		lea	msg_replace(pc),a0
+		lea	msg_confirm_replace(pc),a0
+do_confirm:
 		bsr	werror
 		lea	getsbuf(pc),a0
 		move.b	#GETSLEN,(a0)
@@ -660,6 +803,26 @@ confirm_return:
 confirm_yes:
 		moveq	#'y',d0
 		bra	confirm_return
+
+confirm_move:
+		bsr	werror_myname
+		exg	a0,a1
+		bsr	werror
+		exg	a0,a1
+		move.l	a0,-(a7)
+		lea	msg_wo(pc),a0
+		bsr	werror
+		move.l	(a7),a0
+		bsr	werror
+		lea	msg_confirm_move(pc),a0
+		bra	do_confirm
+*****************************************************************
+newmode:
+		bchg	#MODEBIT_RDO,d0
+		and.b	mode_mask,d0
+		or.b	mode_plus,d0
+		bchg	#MODEBIT_RDO,d0
+		rts
 *****************************************************************
 malloc:
 		move.l	d0,-(a7)
@@ -822,6 +985,35 @@ lgetdate:
 		move.l	(a7)+,d1
 		bra	lgetdate_return
 *****************************************************************
+* is_identical - 2つのファイルが同一かどうか調べる
+*
+* CALL
+*      A0     pathname of file 1
+*      A1     pathname of file 2
+*
+* RETURN
+*      CCR    同一ならば EQ
+*      D0/A2-A3  破壊
+*****************************************************************
+is_identical:
+		lea	target_fatchkbuf(pc),a2
+		bsr	fatchk
+		bmi	is_identical_return		* NE
+
+		movea.l	a2,a3
+		lea	source_fatchkbuf(pc),a2
+		exg	a0,a1
+		bsr	fatchk
+		exg	a0,a1
+		bmi	is_identical_return		*  NE
+
+		cmpm.w	(a2)+,(a3)+
+		bne	is_identical_return		*  NE
+
+		cmpm.l	(a2)+,(a3)+
+is_identical_return:
+		rts
+*****************************************************************
 fatchk:
 		move.l	a2,d0
 		bset	#31,d0
@@ -830,6 +1022,12 @@ fatchk:
 		move.l	a0,-(a7)
 		DOS	_FATCHK
 		lea	10(a7),a7
+		cmp.l	#EBADPARAM,d0
+		bne	fatchk_return
+
+		moveq	#0,d0
+fatchk_return:
+		tst.l	d0
 		rts
 *****************************************************************
 is_chrdev:
@@ -959,6 +1157,9 @@ werror_myname_word_colon_msg:
 werror_newline_and_set_error:
 		bsr	werror_newline
 		moveq	#2,d6
+		btst	#FLAG_e,d5
+		bne	exit_program
+
 		rts
 *****************************************************************
 perror:
@@ -982,7 +1183,7 @@ perror_2:
 .data
 
 	dc.b	0
-	dc.b	'## mv 1.3 ##  Copyright(C)1992 by Itagaki Fumihiko',0
+	dc.b	'## mv 1.5 ##  Copyright(C)1992-93 by Itagaki Fumihiko',0
 
 .even
 perror_table:
@@ -1021,7 +1222,9 @@ msg_too_many_openfiles:		dc.b	'オープンしているファイルが多すぎます',0
 msg_bad_name:			dc.b	'名前が無効です',0
 msg_bad_drive:			dc.b	'ドライブの指定が無効です',0
 msg_write_disabled:		dc.b	'書き込みが許可されていません',0
+msg_semicolon_directory_full:	dc.b	'; '
 msg_directory_full:		dc.b	'ディレクトリが満杯です',0
+msg_semicolon_file_exists:	dc.b	'; '
 msg_file_exists:		dc.b	'ファイルが存在しています',0
 msg_disk_full:			dc.b	'ディスクが満杯です',0
 
@@ -1030,28 +1233,31 @@ msg_colon:			dc.b	': ',0
 msg_dos_version_mismatch:	dc.b	'バージョン2.00以降のHuman68kが必要です',CR,LF,0
 msg_no_memory:			dc.b	'メモリが足りません',CR,LF,0
 msg_illegal_option:		dc.b	'不正なオプション -- ',0
+msg_bad_arg:			dc.b	'引数が正しくありません',0
 msg_too_few_args:		dc.b	'引数が足りません',0
 msg_too_long_pathname:		dc.b	'パス名が長過ぎます',0
 msg_nodir:			dc.b	'ディレクトリがありません',0
 msg_not_a_directory:		dc.b	'ディレクトリではありません',0
-msg_destination:		dc.b	'移動先“',0
-msg_ni:				dc.b	'”に',0
+msg_destination:		dc.b	' の移動先 ',0
+msg_ni:				dc.b	' に',0
 msg_readonly:			dc.b	'書き込み禁止',0
 msg_hidden:			dc.b	'隠し',0
 msg_system:			dc.b	'システム',0
 msg_file:			dc.b	'ファイル',0
-msg_vollabel:			dc.b	'ボリュームラベル',0
+msg_vollabel:			dc.b	'ボリューム・ラベル',0
 msg_symlink:			dc.b	'シンボリック・リンク',0
-msg_replace:			dc.b	'が存在しています．消去しますか？ ',0
+msg_confirm_replace:		dc.b	'が存在しています．消去して移動しますか？ ',0
 msg_wo:				dc.b	' を ',0
+msg_confirm_move:		dc.b	' に移動しますか？ ',0
 msg_cannot_move:		dc.b	' に移動できません',0
 msg_directory_exists:		dc.b	'; 移動先にディレクトリが存在しています',0
 msg_cannot_move_dir_to_its_sub:	dc.b	'; ディレクトリをそのサブディレクトリ下に移動することはできません',0
 msg_cannot_move_dirvol_across:	dc.b	'; ディレクトリやボリューム・ラベルを別のドライブに移動することはできません',0
 msg_drive_differ:		dc.b	'; ドライブが異なります',0
 msg_usage:			dc.b	CR,LF
-	dc.b	'使用法:  mv [-fiuvx] [-] <旧パス名> <新パス名>',CR,LF
-	dc.b	'         mv [-fiuvx] [-] <ファイル> ... <移動先>'
+	dc.b	'使用法:  mv [-Ifiuvx] [-m <属性変更式>] [--] <旧パス名> <新パス名>',CR,LF
+	dc.b	'         mv [-Iefiuvx] [-m <属性変更式>] [--] <ファイル> ... <移動先>',CR,LF,CR,LF
+	dc.b	'         属性変更式: {[ugoa]{{+-=}[ashrwx]}...}[,...]'
 msg_newline:			dc.b	CR,LF
 msg_nul:			dc.b	0
 msg_arrow:			dc.b	' -> ',0
@@ -1074,6 +1280,8 @@ new_pathname:		ds.b	MAXPATH+1
 nameck_buffer1:		ds.b	91
 nameck_buffer2:		ds.b	91
 stdin_is_terminal:	ds.b	1
+mode_mask:		ds.b	1
+mode_plus:		ds.b	1
 .even
 			ds.b	STACKSIZE
 .even
