@@ -35,6 +35,8 @@
 * Itagaki Fumihiko 10-Jun-95  多重mount対応
 * Itagaki Fumihiko 10-Jun-95  エラーチェック強化
 * 1.8
+* Itagaki Fumihiko 18-Jun-95  v1.8でのエンバグを修正
+* 1.9
 *
 * Usage: mv [ -Ifiuvx ] [ -m mode ] [ -- ] <ファイル1> <ファイル2>
 *        mv [ -Ifiuvx ] [ -m mode ] [ -- ] <ディレクトリ1> <ディレクトリ2>
@@ -435,9 +437,9 @@ mv_into_dir:
 		bra	mv_source_to_target
 
 mv_into_dir_loop:
-		move.l	a2,-(a7)
+		movem.l	a1-a2,-(a7)
 		bsr	move_into_dir
-		movea.l	(a7)+,a2
+		movem.l	(a7)+,a1-a2
 		subq.l	#1,d7
 		bcs	exit_program
 
@@ -1537,7 +1539,7 @@ perror_2:
 .data
 
 	dc.b	0
-	dc.b	'## mv 1.8 ##  Copyright(C)1992-95 by Itagaki Fumihiko',0
+	dc.b	'## mv 1.9 ##  Copyright(C)1992-95 by Itagaki Fumihiko',0
 
 .even
 perror_table:
