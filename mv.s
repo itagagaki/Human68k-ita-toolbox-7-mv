@@ -29,6 +29,9 @@
 * Itagaki Fumihiko 30-Dec-93  各ドライブのカレント・ディレクトリの移動を禁止
 * Itagaki Fumihiko 30-Dec-93  ディレクトリを移動したら .. のリンク先を修正する
 * 1.6
+* Itagaki Fumihiko 11-Sep-94  移動しようとするディレクトリが各ドライブのカレント・ディレクトリ
+*                             でないかどうかをチェックする方法を変更
+* 1.7
 *
 * Usage: mv [ -Ifiuvx ] [ -m mode ] [ -- ] <ファイル1> <ファイル2>
 *        mv [ -Ifiuvx ] [ -m mode ] [ -- ] <ディレクトリ1> <ディレクトリ2>
@@ -44,15 +47,11 @@
 .xref getlnenv
 .xref issjis
 .xref strlen
-.xref strcmp
 .xref strfor1
 .xref memcmp
 .xref headtail
 .xref cat_pathname
-.xref bsltosl
 .xref strip_excessive_slashes
-.xref getcwd
-.xref chdir
 .xref fclose
 
 REQUIRED_OSVER	equ	$200			*  2.00以降
@@ -511,7 +510,7 @@ move_into_dir_done:
 *      A1     target path
 *
 * RETURN
-*      D0-D3/A0-A3  破壊
+*      D0-D3/A0-A5  破壊
 *****************************************************************
 move_file:
 		*  source を調べる
@@ -606,48 +605,48 @@ verbose_done:
 		beq	source_dir_ok
 
 		*  mounted point でないかどうか調べる
-		move.l	a0,-(a7)
-		lea	pwd(pc),a0
-		bsr	getcwd				*  pwdに現在の作業ディレクトリを保存しておいて
-		bsr	chdir				*  pwdにchdirしてみる
-		movea.l	(a7)+,a0
-		bmi	no_current_directory		*  pwdにchdirできない -> 2度と戻れない -> エラーにしてしまう
-		bsr	chdir				*  sourceにchdirする
-		bmi	perror
 
-		move.l	a0,-(a7)
-		lea	pathname_buf(pc),a0		*  pathname_bufに
-		bsr	getcwd				*  sourceの正規のパス名を記録する
-		lea	pwd(pc),a0			*  元の作業ディレクトリに
-		bsr	chdir				*  戻る
-		movea.l	(a7)+,a0
-		DOS	_CURDRV
-		move.w	d0,-(a7)
-		DOS	_CHGDRV
-		addq.l	#2,a7
+		lea	source_fatchkbuf(pc),a2
+		bsr	fatchk
+		bmi	source_dir_ok
+
+		DOS	_CURDRV			*
+		move.w	d0,-(a7)		*
+		DOS	_CHGDRV			*  ドライブ数を得る
+		addq.l	#2,a7			*
 		move.l	d0,d2				*  D2.L : ドライブ数
-		lea	drivename_buffer(pc),a3
-		move.b	#'A',(a3)
-		move.b	#':',1(a3)
-		clr.b	2(a3)
+
+		lea	drivename_buffer(pc),a4
+		move.b	#'A',(a4)
+		move.b	#':',1(a4)
+		clr.b	2(a4)
+		lea	pathname_buf(pc),a5
 check_mount_loop:
-		pea	pwd(pc)
-		move.l	a3,-(a7)
+		move.l	a5,-(a7)
+		move.l	a4,-(a7)
 		clr.w	-(a7)
 		DOS	_ASSIGN
 		lea	10(a7),a7
 		not.l	d0
 		bpl	check_mount_next
 
-		movem.l	a0-a1,-(a7)
-		lea	pwd(pc),a0
-		bsr	bsltosl
-		lea	pathname_buf(pc),a1
-		bsr	strcmp
-		movem.l	(a7)+,a0-a1
+		tst.b	3(a5)
+		beq	check_mount_next
+
+		lea	target_fatchkbuf(pc),a2
+		exg	a0,a5
+		bsr	fatchk
+		exg	a0,a5
+		bmi	check_mount_next
+
+		lea	source_fatchkbuf(pc),a3
+		cmpm.w	(a2)+,(a3)+
+		bne	check_mount_next
+
+		cmpm.l	(a2)+,(a3)+
 		beq	cannot_mv_current_directory
 check_mount_next:
-		addq.b	#1,(a3)
+		addq.b	#1,(a4)
 		subq.l	#1,d2
 		bne	check_mount_loop
 source_dir_ok:
@@ -780,11 +779,6 @@ resume_dotdot_done:
 		bne	resume_dotdot_fail
 move_file_return:
 		rts
-
-no_current_directory:
-		lea	pwd(pc),a0
-		lea	msg_no_current_directory(pc),a2
-		bra	werror_myname_word_colon_msg
 
 resume_dotdot_fail:
 		movea.l	a1,a0
@@ -1236,7 +1230,7 @@ readdir:
 		move.b	d0,(a3)
 		move.b	#':',1(a3)
 		clr.b	2(a3)
-		pea	pwd(pc)
+		pea	pathname_buf(pc)
 		move.l	a3,-(a7)
 		clr.w	-(a7)
 		DOS	_ASSIGN
@@ -1282,7 +1276,7 @@ resume_drive_assign:
 
 		move.l	d0,-(a7)
 		move.w	#$60,-(a7)
-		pea	pwd(pc)
+		pea	pathname_buf(pc)
 		pea	drivename_buffer(pc)
 		move.w	#1,-(a7)
 		DOS	_ASSIGN
@@ -1445,7 +1439,7 @@ perror_2:
 .data
 
 	dc.b	0
-	dc.b	'## mv 1.6 ##  Copyright(C)1992-93 by Itagaki Fumihiko',0
+	dc.b	'## mv 1.7 ##  Copyright(C)1992-94 by Itagaki Fumihiko',0
 
 .even
 perror_table:
@@ -1500,7 +1494,6 @@ msg_too_few_args:		dc.b	'引数が足りません',0
 msg_too_long_pathname:		dc.b	'パス名が長過ぎます',0
 msg_nodir:			dc.b	'ディレクトリがありません',0
 msg_not_a_directory:		dc.b	'ディレクトリではありません',0
-msg_no_current_directory:	dc.b	'カレント・ディレクトリがありません',0
 msg_destination:		dc.b	' の移動先 ',0
 msg_ni:				dc.b	' に',0
 msg_readonly:			dc.b	'書き込み禁止',0
@@ -1547,7 +1540,6 @@ filesbuf:		ds.b	STATBUFSIZE
 .even
 getsbuf:		ds.b	2+GETSLEN+1
 pathname_buf:		ds.b	128
-pwd:			ds.b	MAXPATH+1
 new_pathname:		ds.b	MAXPATH+1
 nameck_buffer:		ds.b	91
 drivename_buffer:	ds.b	3
