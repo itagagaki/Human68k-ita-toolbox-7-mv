@@ -16,6 +16,7 @@
 .xref getlnenv
 .xref issjis
 .xref strlen
+.xref strcpy
 .xref strfor1
 .xref headtail
 .xref cat_pathname
@@ -358,7 +359,6 @@ update_ok:
 		*  target を削除する
 		bsr	unlink
 			* エラー処理省略
-		moveq	#-1,d2
 move_file_new:
 		btst	#FLAG_v,d5
 		beq	verbose_done
@@ -373,12 +373,27 @@ move_file_new:
 		DOS	_PRINT
 		lea	12(a7),a7
 verbose_done:
-		*  移動する
 		exg	a0,a1				*  A0:source, A1:target
+		*  sourceを通常のファイルにchmodする
 		moveq	#MODEVAL_ARC,d0
 		bsr	lchmod
 		bmi	perror
 
+		*  sourceがディレクトリなら、ここで、targetをtargetにrenameしてみる
+		*  もし ENODIR が返されるなら、ディレクトリをそのサブディレクトリに
+		*  移動しようとしていることになる
+		btst	#MODEBIT_DIR,d1
+		beq	do_move_file
+
+		move.l	a1,-(a7)
+		move.l	a1,-(a7)
+		DOS	_RENAME
+		addq.l	#8,a7
+		move.l	d0,d2
+		cmp.l	#ENODIR,d2
+		beq	simple_move_failed
+do_move_file:
+		*  移動する
 		move.l	a1,-(a7)
 		move.l	a0,-(a7)
 		DOS	_RENAME
@@ -421,43 +436,32 @@ move_file_return:
 simple_move_failed:
 	*
 	*  エラー
-	*  考えられる原因（検出される順）:-
-	*  o 新パス名が無効 ... EBADNAME
-	*  o ドライブが違う ... EBADDRV
-	*  o 新パス名の途中のディレクトリが存在しない ... ENODIR
-	*  o ディレクトリをそのサブディレクトリに移動しようとした ... ENODIR
-	*  o ファイルが存在する ... EMVEXISTS
-	*  o ディレクトリかボリューム・ラベルを別のディレクトリに移動しようとした ... EWRITE
-	*  o ディレクトリが一杯 ... EDIRFULL
 	*
 		move.l	d1,d0
-		bsr	lchmod
+		bsr	lchmod				*  sourceのmodeを元に戻す
 		bmi	perror
-
-		move.l	d2,d0
+	*
+	*  考えられる原因 :-
+	*    ディレクトリをそのサブディレクトリに移動しようとした ... ENODIR
+	*    ファイルが存在する ... EMVEXISTS
+	*    ディレクトリが一杯 ... EDIRFULL
+	*    ドライブが異なる ... EBADDRV
+	*
 		exg	a0,a1				*  A0:target, A1:source
-		cmp.l	#ENODIR,d0
-		bne	simple_move_failed_1
+		lea	msg_cannot_move_dir_to_its_sub(pc),a2
+		cmp.l	#ENODIR,d2
+		beq	move_error
 
-		bsr	lgetmode
-		cmp.l	d2,d0
-		beq	perror
+		lea	msg_file_exists(pc),a2
+		cmp.l	#EMVEXISTS,d2
+		beq	move_error
 
-		lea	msg_cannot_move_dir_to_sub(pc),a2
-		bra	move_error
-
-simple_move_failed_1:
-		cmp.l	#EBADNAME,d0
-		beq	perror
-
-		cmp.l	#EMVEXISTS,d0
-		beq	perror
-
-		cmp.l	#EDIRFULL,d0
-		beq	perror
+		lea	msg_directory_full(pc),a2
+		cmp.l	#EDIRFULL,d2
+		beq	move_error
 
 		lea	msg_nul(pc),a2
-		cmp.l	#EBADDRV,d0
+		cmp.l	#EBADDRV,d2
 		bne	move_error
 
 		lea	msg_cannot_move_dirvol_across(pc),a2
@@ -973,7 +977,7 @@ perror_2:
 .data
 
 	dc.b	0
-	dc.b	'## mv 1.1 ##  Copyright(C)1992 by Itagaki Fumihiko',0
+	dc.b	'## mv 1.2 ##  Copyright(C)1992 by Itagaki Fumihiko',0
 
 .even
 perror_table:
@@ -1037,7 +1041,7 @@ msg_replace:			dc.b	'が存在しています．消去しますか？',0
 msg_wo:				dc.b	' を ',0
 msg_cannot_move:		dc.b	' に移動できません',0
 msg_directory_exists:		dc.b	'; 移動先にディレクトリが存在しています',0
-msg_cannot_move_dir_to_sub:	dc.b	'; ディレクトリをそのサブディレクトリ下に移動することはできません',0
+msg_cannot_move_dir_to_its_sub:	dc.b	'; ディレクトリをそのサブディレクトリ下に移動することはできません',0
 msg_cannot_move_dirvol_across:	dc.b	'; ディレクトリやボリューム・ラベルを別のドライブに移動することはできません',0
 msg_drive_differ:		dc.b	'; ドライブが異なります',0
 msg_usage:			dc.b	CR,LF
@@ -1059,6 +1063,8 @@ filesbuf:		ds.b	STATBUFSIZE
 getsbuf:		ds.b	2+GETSLEN+1
 pathname_buf:		ds.b	128
 new_pathname:		ds.b	MAXPATH+1
+nameck_buffer1:		ds.b	91
+nameck_buffer2:		ds.b	91
 stdin_is_terminal:	ds.b	1
 .even
 			ds.b	STACKSIZE
