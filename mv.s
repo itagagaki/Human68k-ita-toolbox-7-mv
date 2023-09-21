@@ -1,6 +1,11 @@
 * mv - move file
 *
 * Itagaki Fumihiko 30-Aug-92  Create.
+* 1.2
+* Itagaki Fumihiko 06-Nov-92  Human68kのfatchkのバグ対策．
+*                             strip_excessive_slashesのバグfixに伴う改版．
+*                             些細なメッセージ変更．
+* 1.3
 *
 * Usage: mv [ -fiuvx ] <ファイル1> <ファイル2>
 *        mv [ -fiuvx ] <ディレクトリ1> <ディレクトリ2>
@@ -977,7 +982,7 @@ perror_2:
 .data
 
 	dc.b	0
-	dc.b	'## mv 1.2 ##  Copyright(C)1992 by Itagaki Fumihiko',0
+	dc.b	'## mv 1.3 ##  Copyright(C)1992 by Itagaki Fumihiko',0
 
 .even
 perror_table:
@@ -1037,7 +1042,7 @@ msg_system:			dc.b	'システム',0
 msg_file:			dc.b	'ファイル',0
 msg_vollabel:			dc.b	'ボリュームラベル',0
 msg_symlink:			dc.b	'シンボリック・リンク',0
-msg_replace:			dc.b	'が存在しています．消去しますか？',0
+msg_replace:			dc.b	'が存在しています．消去しますか？ ',0
 msg_wo:				dc.b	' を ',0
 msg_cannot_move:		dc.b	' に移動できません',0
 msg_directory_exists:		dc.b	'; 移動先にディレクトリが存在しています',0
@@ -1054,9 +1059,12 @@ dos_wildcard_all:		dc.b	'*.*',0
 *****************************************************************
 .bss
 
+.even
 lndrv:			ds.l	1
-source_fatchkbuf:	ds.b	14
-target_fatchkbuf:	ds.b	14
+.even
+source_fatchkbuf:	ds.b	14+8			*  +8 : fatchkバグ対策
+.even
+target_fatchkbuf:	ds.b	14+8			*  +8 : fatchkバグ対策
 .even
 filesbuf:		ds.b	STATBUFSIZE
 .even
