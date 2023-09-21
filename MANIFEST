@@ -1,0 +1,7 @@
+MANIFEST       このファイル
+README         まず最初にお読み下さい
+NOTICE         版権と許諾についての告示書
+DIRECTORY      ITA製品リスト
+CHANGES        mvのモデルチェンジの履歴
+mv.1           mvのマニュアル
+mv.x           mv実行ファイル
