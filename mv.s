@@ -24,7 +24,7 @@
 
 REQUIRED_OSVER	equ	$200			*  2.00à»ç~
 
-STACKSIZE	equ	512
+STACKSIZE	equ	4096
 GETSLEN		equ	32
 
 FLAG_f		equ	0
@@ -973,7 +973,7 @@ perror_2:
 .data
 
 	dc.b	0
-	dc.b	'## mv 1.0 ##  Copyright(C)1992 by Itagaki Fumihiko',0
+	dc.b	'## mv 1.1 ##  Copyright(C)1992 by Itagaki Fumihiko',0
 
 .even
 perror_table:
